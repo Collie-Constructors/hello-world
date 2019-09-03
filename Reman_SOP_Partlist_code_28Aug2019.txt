@@ -1,0 +1,275 @@
+**************************************************************************
+Purpose: Query to create a REMAN_SOP_PART_LIST
+
+Requested by:  (Laura Bertsch)
+
+Created on:  (26AUG019)
+Created by:  (Sangeetha Pattiyil)
+
+Revised on:  (28Aug2019)
+Revised by:  (Laura & Sangeetha)
+Reason:	(include descriptive column details and confirm the output)
+
+Reviewed on:  (ddMMMyyyy)
+Reviewed by:  (reviewers)
+
+Frequency:  Daily
+
+Outline of this program: 
+	Step 1 EDS DWG DATA
+	Step 2 DPOF as defined by '0R, 11R, or X' containing
+	Step 3 JOIN D7P2(SERVICEABLE PARTS) TO EDS
+	Step 4 JOIN REMAN PN'S THAT ARE REMAN SUPPLIER CODE THAT MIGHT NOT BE ON OUR COMBINED LIST SO FAR
+	Step 5 JOIN REMAN SEED PN'S (CONNECTION TO D7cf005$_V_SEED_PART_XREF) 
+	Step 6 Take the final output list and Add descriptive details from source tables
+	Step 7
+	Step 8 		
+
+****************************************************************************;
+****************************************************************************
+Input:	
+	Oracle servers
+	1.Z1P1.EDSWH_DWG_DTA
+	2.DPOF.DPO_PART_INFO
+	3.D7P2.V_SRVD_PART
+	4.D7P2.V_PT_ENT_SRCUS_SUP
+	5.D7P2.V_SEED_PART_XREF
+	6.d7p2.V_PART_ENT_SRCUS
+
+****************************************************************************;
+****************************************************************************
+Output:
+	IA_REMAN.SC_AFTMKT_SOP_REMAN_PRTLST 
+	IA_REMAN.SC_AFTMKT_SOP_REMAN_PRTLST_DTL
+****************************************************************************;
+****************************************************************************
+	
+****************************************************************************;
+****************************************************************************;
+%INCLUDE '/sasdata/ia_pgms/programs/standard_work/header.sas';
+LIBNAME LPSD "/sasdata/ia_temp_data/durgop/LPSD Parts Availability";
+****************************************************************************;
+%LET ORA_PATH="F8P1.mw.na.CAT.COM";
+	LIBNAME IA_REMAN ORACLE USER=IA_REMAN 
+	PASS="{SAS002}AF665B39384A11D2455AF9C108EEB1B2" PATH=&ORA_PATH SCHEMA=IA_REMAN 
+	DBSLICEPARM=(ALL, 2) INSERTBUFF=10000 UPDATEBUFF=1000;
+
+	libname d7p2 odbc datasrc="d7p2" schema="d7fc005$" sql_functions=all
+  	dbconinit="set current degree='ANY'"
+  	connection=globalread                  
+  	authdomain=acf2; 
+  	
+ 	libname Z1P1 odbc datasrc="Z1P1" schema="Z1VN001$" sql_functions=all
+  	dbconinit="set current degree='ANY'"
+  	connection=globalread                  
+  	authdomain=acf2;
+****************************************************************************;
+****************************************************************************
+Data Filters/Parameters:
+EDSWH_DWG_DTA with 5 Dsgn Ctl filter and filter for Latest
+****************************************************************************;
+****************************************************************************;
+/*FILTER ONLY FOR REMAN SUPPLIER CODES*/
+%LET SUPP="A3142T0","B3903K0","E8143P7","F4610B0","K0495H0","X1103L0","X8241K0";
+%LET DSGN_CTL="A250","A252","W955","W957","MX250";
+
+****************************************************************************;
+* Step 1 EDS DWG DATA
+****************************************************************************;
+/*26794*/
+PROC SQL;
+	CREATE TABLE EDS_PRT_LST_REMAN AS SELECT DISTINCT COMPRESS(PART_NO) AS PART_NO	
+	FROM Z1P1.EDSWH_DWG_DTA
+	WHERE COMPRESS(DSGN_CTL_CD) IN (&DSGN_CTL) AND COMPRESS(APRV_PEND_IND)='L';
+QUIT;
+
+****************************************************************************;
+* Step 2 DPOF as defined by '0R, 11R, or X' containing
+/* 13978 */
+****************************************************************************;
+PROC SQL;
+	CREATE TABLE DPOF_PART AS SELECT DISTINCT compress(PART_NO_ID) AS PART_NO
+	FROM DPOF.DPO_PART_INFO
+	WHERE PART_NO_ID CONTAINS ('11R') OR PART_NO_ID CONTAINS ('0R') OR PROD_MAJ_MNR_CLS CONTAINS ('X');
+QUIT;
+
+****************************************************************************;
+* Step 3 JOIN D7P2(SERVICEABLE PARTS) TO EDS
+inner join is taking only the Part_no that are common to both tables
+/* 13154 */
+****************************************************************************;
+PROC SQL;
+	CREATE TABLE SRVD_DWG_PART AS SELECT DISTINCT compress(A.ID_PART) AS PART_NO
+	FROM D7P2.V_SRVD_PART AS A INNER JOIN EDS_PRT_LST_REMAN AS B
+	ON COMPRESS(A.ID_PART)=COMPRESS(B.PART_NO);
+QUIT;
+
+/* Take the 13978 of DPO Reman PN's and 13154 of Serviceable EDS PN's and join lists */
+/* First create a distinct list of both added together */
+/* output of this union is 14247 */
+
+PROC SQL;
+	CREATE TABLE DPOF_SRVD_DWG AS SELECT DISTINCT PART_NO
+	FROM DPOF_PART
+	UNION
+	SELECT DISTINCT PART_NO 
+	FROM SRVD_DWG_PART;
+QUIT;
+
+****************************************************************************;
+* Step 4 JOIN REMAN PN'S THAT ARE REMAN SUPPLIER CODE THAT MIGHT NOT BE ON OUR COMBINED LIST SO FAR
+****************************************************************************;
+/* 9251 */
+PROC SQL;
+	CREATE TABLE V_SUP_CD AS SELECT DISTINCT compress(ID_PART) AS PART_NO
+	FROM D7P2.V_PT_ENT_SRCUS_SUP
+	WHERE SUPP_CD IN (&SUPP);
+QUIT;
+/*ADD PART NUMBERS WITH REMAN SUPPLIER CODE to the previous list of DPOF_SRVD_DWG to get (EDS+SRVD+DOPF+SUPP)*/
+/* added 2703 PN's */
+/* 16950 */
+PROC SQL;
+	CREATE TABLE DPOF_SRVD_DWG_SUPP AS SELECT DISTINCT PART_NO
+	FROM DPOF_SRVD_DWG
+	UNION
+	SELECT DISTINCT PART_NO 
+	FROM V_SUP_CD;
+QUIT;
+
+
+****************************************************************************;
+* Step 5 JOIN REMAN SEED PN'S (CONNECTION TO D7cf005$_V_SEED_PART_XREF) 
+****************************************************************************;
+PROC SQL;
+	CREATE TABLE V_SEED_XREF AS SELECT DISTINCT compress(ID_PART) AS PART_NO,
+	compress(SEED_PART_NO) as seed_part_no
+	FROM D7P2.V_SEED_PART_XREF;
+QUIT;
+
+/* adds 2 part_no's to get us to 16952 */
+PROC SQL;
+	CREATE TABLE DPOF_SRVD_DWG_SUPP_SEED1 AS SELECT DISTINCT PART_NO
+	FROM DPOF_SRVD_DWG_SUPP
+	UNION
+	SELECT DISTINCT PART_NO 
+	FROM V_SEED_XREF;
+QUIT;
+
+/* add in 4451 distinct SEED_PN's to the complete list to end with 21403 */
+/* 21403 */
+PROC SQL;
+	CREATE TABLE DPOF_SRVD_DWG_SUPP_SEED AS SELECT DISTINCT PART_NO
+	FROM DPOF_SRVD_DWG_SUPP_SEED1
+	UNION
+	SELECT DISTINCT SEED_PART_NO AS PART_NO
+	FROM V_SEED_XREF;
+QUIT;
+
+%IA_PUSH_TABLE_ORA(DPOF_SRVD_DWG_SUPP_SEED, IA_REMAN.SC_AFTMKT_SOP_REMAN_PRTLST);
+
+
+
+****************************************************************************;
+* Step 6 Take the final output list and Add descriptive details from source tables
+****************************************************************************;
+
+/* add a column called SEED_IND to be marked Y if these 4451 PN's came from DPOF_SRVD_DWG_SUPP_SEED1 */
+PROC SQL;
+CREATE TABLE SC_AFTMKT_SOP_REMAN_PRTLST_DTL1 AS SELECT *,
+CASE WHEN PART_NO IN (SELECT DISTINCT SEED_PART_NO FROM V_SEED_XREF) THEN 'Y' ELSE 'N' END AS 
+SEED_IND FROM IA_REMAN.SC_AFTMKT_SOP_REMAN_PRTLST;
+QUIT;
+
+
+/*  fetch part no from seed _ref table */
+
+proc sql;
+create table seed_part as select a.*,B.PART_NO AS REMAN_REF_PN
+From SC_AFTMKT_SOP_REMAN_PRTLST_DTL1 as a LEFT JOIN V_SEED_XREF AS B
+ON A.PART_NO=B.SEED_PART_NO;
+QUIT;
+/*3356219  */
+PROC SORT DATA=SEED_PART ; BY PART_NO;RUN;
+
+
+
+PROC TRANSPOSE DATA=seed_part OUT=seed_part1 ;BY PART_NO SEED_IND;
+VAR REMAN_REF_PN;
+RUN;
+DATA SEED_PART(DROP=COL1 COL2 COL3);
+SET SEED_PART1(DROP=_NAME_);
+REMAN_REF_PN=CATX(',',COL1,COL2,COL3);
+RUN;
+
+PROC SQL;
+CREATE TABLE SEED_PART2 AS SELECT A.*,B.SEED_PART_NO
+FROM SEED_PART AS A LEFT JOIN V_SEED_XREF AS B
+ON COMPRESS(A.PART_NO)=COMPRESS(B.PART_NO);
+QUIT;
+
+/* Let's call this table output IA_REMAN.REMAN_SOP_PART_LIST_DETAILS */
+/* create a separate list for Camille with column details */
+/* please take the final list from DPOF_SRVD_DWG_SUPP_SEED */
+/* then from Z1P1.EDSWH_DWG_DTA add: */
+/* 	DSGN_CTL_CD */
+/* 	PART_NM */
+/* from DPOF.DPO_PART_INFO add: */
+/* 	PROD_MAJ_MNR_CLS    */
+/*     PART_PROD_CD */
+/* from D7P2.V_PART_ENT_SRCUS add: */
+/* 	DT_EFF_OUT (when there are more than one date (i.e. Entry Points), use only the latest, most recent date) */
+/* 	 */
+/* Can we create a column that has the SEED_PART for reference next to the few PN's that have a seed reference */
+
+
+PROC SQL;
+CREATE TABLE SC_AFTMKT_SOP_REMAN_PRTLST_DTL AS SELECT 
+A.*,
+B.DSGN_CTL_CD,
+B.PART_NM,
+C.PROD_MAJ_MNR_CLS,
+C.PART_PROD_CD,
+D.DT_EFF_OUT
+FROM SEED_PART2 AS A LEFT JOIN (SELECT DISTINCT COMPRESS(PART_NO) AS PART_NO,
+DSGN_CTL_CD,PART_NM FROM Z1P1.EDSWH_DWG_DTA WHERE COMPRESS(APRV_PEND_IND)='L' and ENGR_DWG_VERS='-') AS B
+ON COMPRESS(A.PART_NO)=COMPRESS(B.PART_NO)
+ LEFT JOIN (SELECT DISTINCT PART_NO_ID,PROD_MAJ_MNR_CLS,PART_PROD_CD FROM DPOF.DPO_PART_INFO) AS C  
+ ON COMPRESS(A.PART_NO)=COMPRESS(C.PART_NO_ID) 
+ LEFT JOIN (SELECT DISTINCT ID_PART,MAX(DT_EFF_OUT) AS DT_EFF_OUT FORMAT=DATE9.
+ FROM d7p2.V_PART_ENT_SRCUS) AS D
+ ON COMPRESS(A.PART_NO)=COMPRESS(D.ID_PART) 
+  ;
+QUIT; 
+
+%IA_PUSH_TABLE_ORA(SC_AFTMKT_SOP_REMAN_PRTLST_DTL, IA_REMAN.SC_AFTMKT_SOP_REMAN_PRTLST_DTL);
+ 
+PROC SQL;
+CREATE TABLE SC_AFTMKT_SOP_REMAN_PRTLST_SUP AS SELECT 
+A.*,
+B.DSGN_CTL_CD,
+B.PART_NM,
+C.PROD_MAJ_MNR_CLS,
+C.PART_PROD_CD,
+D.DT_EFF_OUT,
+E.SUPP_CD 
+FROM SEED_PART2 AS A LEFT JOIN (SELECT DISTINCT COMPRESS(PART_NO) AS PART_NO,
+DSGN_CTL_CD,PART_NM FROM Z1P1.EDSWH_DWG_DTA WHERE COMPRESS(APRV_PEND_IND)='L' and ENGR_DWG_VERS='-') AS B
+ON COMPRESS(A.PART_NO)=COMPRESS(B.PART_NO)
+ LEFT JOIN (SELECT DISTINCT PART_NO_ID,PROD_MAJ_MNR_CLS,PART_PROD_CD FROM DPOF.DPO_PART_INFO) AS C  
+ ON COMPRESS(A.PART_NO)=COMPRESS(C.PART_NO_ID) 
+ LEFT JOIN (SELECT DISTINCT ID_PART,MAX(DT_EFF_OUT) AS DT_EFF_OUT FORMAT=DATE9.
+ FROM d7p2.V_PART_ENT_SRCUS) AS D
+ ON COMPRESS(A.PART_NO)=COMPRESS(D.ID_PART) 
+ LEFT JOIN (SELECT DISTINCT ID_PART,SUPP_CD
+ FROM D7P2.V_PT_ENT_SRCUS_SUP) AS E
+ ON COMPRESS(A.PART_NO)=COMPRESS(E.ID_PART)
+  ;
+QUIT; 
+
+%IA_PUSH_TABLE_ORA(SC_AFTMKT_SOP_REMAN_PRTLST_SUP, IA_REMAN.SC_AFTMKT_SOP_REMAN_PRTLST_SUP);
+
+
+/* See if we can add in supplier name detail */
+data PART_ENTPT_DETAIL;
+set D7P2.PART_ENTPT_DETAIL;
+run;
